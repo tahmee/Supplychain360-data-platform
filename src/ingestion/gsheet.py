@@ -7,13 +7,7 @@ import pandas as pd
 from botocore.exceptions import BotoCoreError, ClientError
 from google.oauth2.service_account import Credentials
 
-from utils.config import (
-    AWS_REGION,
-    get_google_credentials,
-    get_logger,
-    now_iso,
-    GSHEET_ID
-)
+from utils.config import AWS_REGION, GSHEET_ID, get_google_credentials, get_logger, now_iso
 from utils.validate import save_validation_report, validate_parquet
 
 
@@ -33,9 +27,8 @@ GSHEET_SCOPES = [
 
 logger = get_logger("gsheet")
 
-# ---------------------------------------------------------------------------
-# GOOGLE SHEETS READER
-# ---------------------------------------------------------------------------
+
+# Read from Google Sheet
 
 def read_sheet(spreadsheet_id: str, tab_name: str) -> pd.DataFrame:
     """
@@ -86,6 +79,7 @@ def to_parquet(df: pd.DataFrame, ingestion_ts: str, run_id: str) -> tuple[bytes,
 
 # Main
 lines="-"* 40
+
 def main():
     run_id       = str(uuid.uuid4())
     ingestion_ts = now_iso()
