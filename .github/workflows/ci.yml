@@ -1,0 +1,138 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - "feature/**"
+      - develop
+  pull_request:
+    branches:
+      - main
+      - develop
+
+jobs:
+  # Detect which parts of the repo changed (feature branches)
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      ingestion: ${{ steps.filter.outputs.ingestion }}
+      dbt:       ${{ steps.filter.outputs.dbt }}
+      infra:     ${{ steps.filter.outputs.infra }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            ingestion:
+              - 'src/**'
+            dbt:
+              - 'dbt/**'
+            infra:
+              - 'infra/**'
+
+            
+  # Python ingestion tests
+  test-ingestion:
+    needs: changes
+    if: needs.changes.outputs.ingestion == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r src/requirements.txt pytest pytest-cov
+
+      - name: Run unit tests
+        run: pytest src/tests/ -v --cov=src --cov-report=xml --cov-report=term-missing
+        env:
+          DEPLOY_ENV: local
+          AWS_REGION: eu-central-1
+          # Dummy values so config.py doesn't raise at import
+          DB_CRED: "postgresql+psycopg2://user:pass@localhost/test"
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage.xml
+          fail_ci_if_error: false
+
+
+  # dbt compile + schema test (no warehouse needed)
+
+  test-dbt:
+    needs: changes
+    if: needs.changes.outputs.dbt == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dbt-snowflake
+        run: pip install dbt-snowflake dbt-utils
+
+      - name: dbt deps
+        run: dbt deps --profiles-dir dbt --project-dir dbt
+        env:
+          # Dummy vars satisfy dbt env_var() calls without connecting
+          SNOWFLAKE_ACCOUNT: dummy
+          SNOWFLAKE_USER: dummy
+          SNOWFLAKE_PRIVATE_KEY_PATH: /dev/null
+
+      - name: dbt compile (parse check)
+        run: dbt compile --profiles-dir dbt --project-dir dbt
+        env:
+          SNOWFLAKE_ACCOUNT: dummy
+          SNOWFLAKE_USER: dummy
+          SNOWFLAKE_PRIVATE_KEY_PATH: /dev/null
+
+
+  # Terraform validate (no AWS credentials needed)
+
+  test-infra:
+    needs: changes
+    if: needs.changes.outputs.infra == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.9"
+
+      - name: Terraform fmt check (bootstrap)
+        run: terraform fmt -check -recursive
+        working-directory: infra/bootstrap
+
+      - name: Terraform validate (bootstrap)
+        run: terraform init -backend=false && terraform validate
+        working-directory: infra/bootstrap
+
+      - name: Terraform fmt check (main)
+        run: terraform fmt -check -recursive
+        working-directory: infra/main
+
+      - name: Terraform validate (main)
+        run: |
+          terraform init -backend=false \
+            -var="snowflake_organization=dummy" \
+            -var="snowflake_account=dummy" \
+            -var="snowflake_user=dummy" \
+            -var="snowflake_password=dummy" && \
+          terraform validate
+        working-directory: infra/main 
