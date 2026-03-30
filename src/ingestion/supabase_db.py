@@ -1,9 +1,12 @@
 import io
 import re
 import uuid
+import gc
 
+import awswrangler as wr
 import boto3
 import pandas as pd
+import pyarrow as pa
 from botocore.exceptions import BotoCoreError, ClientError
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
@@ -15,18 +18,23 @@ from utils.validate import save_validation_report, validate_parquet
 #Config
 
 TABLE_PATTERN = re.compile(r"^sales[_/](\d{4})[_/](\d{2})[_/](\d{2})$")
+CHUNK = 50_000
+MIN_PART_SIZE = 5 * 1024 * 1024
 DEST_BUCKET  = "supplychain360-bucket-t3"
 DEST_PREFIX  = "source_data/postgres/"
 SOURCE_NAME = "database"
 
+LINES = "-" * 40
+
 logger = get_logger(SOURCE_NAME)
 
+session = boto3.Session(region_name=AWS_REGION)
 # Db settings
 
 def build_engine():
     try:
         db_cred = get_db_cred()
-        logger.info(f"--- INITIALIZING DATABASE ENGINE ---")
+        logger.info(f"--- Initializing Database Engine ---")
         engine = create_engine(db_cred, connect_args={"connect_timeout": 10}, pool_pre_ping=True)
         # Verify connectivity immediately
         with engine.connect() as conn:
@@ -54,13 +62,17 @@ def list_sales_tables(engine) -> list[str]:
     logger.info("Found %d matching sales table(s).", len(tables))
     return tables
 
-
 def read_table(engine, table_name: str) -> pd.DataFrame:
-    df = pd.read_sql(f'SELECT * FROM "{DB_SCHEMA}"."{table_name}"', engine)
+    query = f'SELECT * FROM "{DB_SCHEMA}"."{table_name}"'
     chunks = []
-    for chunk in pd.read_sql(query, engine, chunksize=50000):
-        chunks.append(chunk)
-        
+    with engine.connect() as conn:
+        for chunk in pd.read_sql(query, conn, chunksize=CHUNK):
+            chunks.append(chunk)
+            gc.collect()
+
+    if not chunks:
+        raise ValueError(f"Table '{table_name}' has no rows.")
+
     df = pd.concat(chunks, ignore_index=True)
 
     if df.empty:
@@ -85,7 +97,7 @@ def build_dest_key(table_name: str) -> str:
 
 # Parquet Conversion
 
-def to_parquet(df: pd.DataFrame, table_name: str, ingestion_ts: str, run_id: str) -> tuple[bytes, pd.DataFrame]:
+def to_parquet(df: pd.DataFrame, table_name: str, ingestion_ts: str, run_id: str, dest_key: str) -> tuple[bytes, pd.DataFrame]:
     """Transforms DataFrame and returns parquet bytes + the source df for validation."""
     if "transaction_id" in df.columns:
         df["transaction_id"] = df["transaction_id"].astype(str)
@@ -98,41 +110,43 @@ def to_parquet(df: pd.DataFrame, table_name: str, ingestion_ts: str, run_id: str
     df["_source_table"] = table_name
     df["_ingested_by"] = "supabase_ingest_script"
 
-    buf = io.BytesIO()
-    df.to_parquet(buf, index=False, engine="pyarrow")
-    return buf.getvalue(), source_df
+    s3_path = f"s3://{DEST_BUCKET}/{dest_key}"
+    wr.s3.to_parquet(
+        df=df,
+        path=s3_path,
+        boto3_session=session,
+        compression="snappy",
+        index=False,
+    )
+    logger.info("Uploaded to %s", s3_path)
+    return source_df
 
 
 # MAIN
-lines="-"* 40
 
 def main() -> None:
     run_id = str(uuid.uuid4())
     ingestion_ts = now_iso()
 
-    logger.info(lines)
+    logger.info(LINES)
     logger.info("SUPABASE INGESTION RUN STARTED")
     logger.info("Run ID    : %s", run_id)
     logger.info("Timestamp : %s", ingestion_ts)
-    logger.info(lines)
+    logger.info(LINES)
 
     # Initialize Engine
     try:
         engine = build_engine()
     except OperationalError as exc:
-        logger.critical("DB connection failed: %s", exc); raise SystemExit(1)
-
-    # Connect to S3 
-    try:
-        dst_s3 = boto3.client("s3", region_name=AWS_REGION)
-    except Exception as exc:
-        logger.critical("AWS session failed: %s", exc); raise SystemExit(1)
+        logger.critical("DB connection failed: %s", exc)
+        raise SystemExit(1)
 
     # Discover and Filter Tables
     try:
         all_tables = list_sales_tables(engine)
     except SQLAlchemyError as exc:
-        logger.critical("Failed to list tables: %s", exc); raise SystemExit(1)
+        logger.critical("Failed to list tables: %s", exc)
+        raise SystemExit(1)
 
     if not all_tables:
         logger.warning("No sales tables found.")
@@ -148,25 +162,25 @@ def main() -> None:
     if not new_tables:
         logger.info("All tables up to date.")
         return
+    
     # Processing Loop
     succeeded, failed = [], []
 
     for table_name in new_tables:
         logger.info("Processing: %s", table_name)
         try:
-            df = read_table(engine, table_name)
-            parquet_bytes, source_df = to_parquet(df, table_name, ingestion_ts, run_id)
             dest_key = build_dest_key(table_name)
 
-            dst_s3.put_object(
-                Bucket=DEST_BUCKET, Key=dest_key,
-                Body=parquet_bytes, ContentType="application/octet-stream",
-            )
-            logger.info("uploaded to s3://%s/%s", DEST_BUCKET, dest_key)
+            df = read_table(engine, table_name)
+            source_df = to_parquet(df, table_name, ingestion_ts, run_id, dest_key)
+            
+            # Free the full df from memory now that it's uploaded
+            del df
+            gc.collect()
 
             validation_result = validate_parquet(
                 source_df=source_df, 
-                s3_client=dst_s3,
+                s3_client=session.client("s3"),
                 bucket=DEST_BUCKET, 
                 dest_key=dest_key,
                 run_id=run_id, 
@@ -179,7 +193,7 @@ def main() -> None:
 
             watermark[table_name] = ingestion_ts
             succeeded.append(table_name)
-            logger.info("done")
+            logger.info("Done: %s", table_name)
 
         except ValueError as exc:
             logger.error("Data/validation error '%s': %s", table_name, exc)
@@ -196,14 +210,14 @@ def main() -> None:
 
     save_watermark(SOURCE_NAME, watermark)
 
-    logger.info(lines)
+    logger.info(LINES)
     logger.info("RUN SUMMARY  |  Run ID: %s", run_id)
     logger.info("  Succeeded : %d", len(succeeded))
     logger.info("  Failed    : %d", len(failed))
     if failed:
         for f in failed:
-            logger.warning(" %s — %s", f["table"], f["error"])
-    logger.info(lines)
+            logger.warning("%s — %s", f["table"], f["error"])
+    logger.info(LINES)
 
     if failed:
         raise SystemExit(1)
