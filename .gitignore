@@ -250,3 +250,5 @@ __marimo__/
 
 logs/
 service_account*
+watermark/
+test.py
