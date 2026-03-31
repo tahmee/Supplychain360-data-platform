@@ -1,5 +1,5 @@
 {% test positive_value(model, column_name) %}
--- Asserts that a numeric column contains only positive values (> 0).
+-- Check that a numeric column contains only positive values (> 0).
 select *
 from {{ model }}
 where {{ column_name }} <= 0
@@ -7,7 +7,7 @@ where {{ column_name }} <= 0
 
 
 {% test not_negative(model, column_name) %}
--- Asserts that a numeric column contains no negative values (>= 0).
+-- Confirm that a numeric column contains no negative values (>= 0).
 select *
 from {{ model }}
 where {{ column_name }} < 0
@@ -15,7 +15,7 @@ where {{ column_name }} < 0
 
 
 {% test valid_delivery_status(model, column_name) %}
--- Asserts delivery_status is one of the three expected values.
+-- Confirms delivery_status is one of the three expected values.
 select *
 from {{ model }}
 where {{ column_name }} not in ('ON_TIME', 'LATE', 'PENDING')
@@ -23,7 +23,7 @@ where {{ column_name }} not in ('ON_TIME', 'LATE', 'PENDING')
 
 
 {% test valid_stock_level(model, column_name) %}
--- Asserts stock_level is one of the three expected values.
+-- Confirms stock level is one of the three expected values.
 select *
 from {{ model }}
 where {{ column_name }} not in ('ADEQUATE', 'LOW_STOCK', 'OUT_OF_STOCK')

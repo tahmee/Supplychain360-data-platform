@@ -15,6 +15,7 @@ renamed as (
         cast(state as varchar) as state,
         cast(region as varchar) as region,
         cast(store_open_date as date)    as store_open_date,
+        
         _ingestion_timestamp
 
     from source

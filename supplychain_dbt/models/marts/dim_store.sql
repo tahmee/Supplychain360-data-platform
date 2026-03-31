@@ -1,7 +1,6 @@
 -- dim_store.sql
 -- SCD Type II dimension tracking store attribute changes over time.
 -- Tracked columns: store_name, city, state, region.
--- store_open_date is a fixed attribute and does not trigger a new version.
 
 with snapshot as (
 
@@ -28,7 +27,7 @@ final as (
         state,
         region,
 
-        -- Fixed attribute (does not change; carried on every version)
+        -- Fixed attribute
         store_open_date
 
     from snapshot

@@ -17,7 +17,7 @@ date_dim as (
 final as (
 
     select
-        -- surrogate key (no natural PK in snapshot tables)
+        -- surrogate key 
         {{ dbt_utils.generate_surrogate_key(['warehouse_id', 'product_id', 'snapshot_date']) }}
             as inventory_key,
 

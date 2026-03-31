@@ -2,7 +2,7 @@ version: 2
 
 models:
   - name: stg_sales
-    description: "Cleaned and typed sales transactions from Supabase."
+    description: "Cleaned and proper typed sales transactions from Supabase."
     columns:
       - name: transaction_id
         tests: [not_null, unique]

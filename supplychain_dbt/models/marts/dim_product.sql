@@ -1,9 +1,7 @@
 -- dim_product.sql
--- SCD Type II dimension. Reads from the dbt snapshot which tracks all
--- historical versions of each product row.
--- is_current = true  → the active version used in current-state reporting
--- is_current = false → historical version; join on surrogate_key + valid_from/to
---                      for point-in-time (as-of) reporting
+-- SCD Type II dimension. Reads from the dbt snapshot which tracks all historical versions of each product row.
+-- is_current = true  - the active version used in current-state reporting
+-- is_current = false - historical version; join on surrogate_key + valid_from/to for point-in-time (as-of) reporting
 
 with snapshot as (
 
@@ -14,8 +12,7 @@ with snapshot as (
 suppliers as (
 
     -- Pull only the current supplier record for the denormalised columns.
-    -- Supplier history is tracked in dim_supplier; here we just want a
-    -- readable name to go alongside the product row.
+    -- Supplier history is tracked in dim_supplier
     select
         supplier_id,
         supplier_name,
