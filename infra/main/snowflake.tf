@@ -22,8 +22,6 @@ resource "snowflake_storage_integration_aws" "s3_integration" {
 #   storage_aws_role_arn = aws_iam_role.snowflake_role.arn
 # }
 
-
-
 # Resource with AWS IAM role credentials
 resource "snowflake_stage_external_s3" "complete" {
   name                = "complete_s3_stage"
