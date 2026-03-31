@@ -9,9 +9,9 @@ with source as (
 renamed as (
 
     select
-        cast(warehouse_id  as varchar) as warehouse_id,
-        cast(city          as varchar) as city,
-        cast(state         as varchar) as state,
+        cast(warehouse_id as varchar) as warehouse_id,
+        cast(city as varchar) as city,
+        cast(state as varchar) as state,
         _ingestion_timestamp
 
     from source
