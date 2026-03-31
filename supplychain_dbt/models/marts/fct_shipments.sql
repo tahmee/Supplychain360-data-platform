@@ -1,8 +1,7 @@
 -- fct_shipments.sql
 -- Grain: one product shipped from a warehouse to a store per shipment.
 --
--- SCD Type II join: product and warehouse versions are matched to the
--- shipment_date so historical analysis reflects the attributes at dispatch.
+-- SCD Type II join: product and warehouse versions are matched to the shipment_date so historical analysis reflects the attributes at dispatch.
 
 with shipments as (
 
@@ -43,7 +42,7 @@ warehouses as (
 final as (
 
     select
-        -- Surrogate FKs (point-in-time dimension versions)
+        -- Surrogate FKs 
         p.product_surrogate_key,
         w.warehouse_surrogate_key,
 
@@ -55,7 +54,7 @@ final as (
         p.supplier_id,
         d.date_id,
 
-        -- Measures / attributes
+        -- Measures
         sh.quantity_shipped,
         sh.carrier,
         sh.shipment_date,
@@ -78,7 +77,7 @@ final as (
     left join date_dim d
         on sh.shipment_date = d.full_date
 
-    -- Point-in-time product version at shipment date
+    -- Point in time product version at shipment date
     left join products p
         on  sh.product_id = p.product_id
         and sh.shipment_date >= cast(p.valid_from as date)
@@ -87,7 +86,7 @@ final as (
             or p.valid_to is null
         )
 
-    -- Point-in-time warehouse version at shipment date
+    -- Point in time warehouse version at shipment date
     left join warehouses w
         on  sh.warehouse_id = w.warehouse_id
         and sh.shipment_date >= cast(w.valid_from as date)

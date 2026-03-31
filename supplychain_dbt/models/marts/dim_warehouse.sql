@@ -1,6 +1,6 @@
 -- dim_warehouse.sql
 -- SCD Type II dimension tracking warehouse attribute changes over time.
--- Tracked columns: city, state (warehouses occasionally relocate or are renamed).
+-- Tracked columns: city, state
 
 with snapshot as (
 
