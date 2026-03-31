@@ -2,3 +2,14 @@
 target/
 dbt_packages/
 logs/
+
+
+dbt_modules/ 
+
+
+venv/
+.venv/
+__pycache__/
+.tox/
+.pytest_cache/
+.DS_Store
