@@ -11,7 +11,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 
-from utils.config import AWS_REGION, DB_SCHEMA, get_db_cred, get_logger, load_watermark, now_iso, save_watermark
+from utils.config import AWS_REGION, DB_SCHEMA, get_db_cred, get_dest_s3_session, get_logger, load_watermark, now_iso, save_watermark
 from utils.validate import save_validation_report, validate_parquet
 
 
@@ -28,7 +28,7 @@ LINES = "-" * 40
 
 logger = get_logger(SOURCE_NAME)
 
-session = boto3.Session(region_name=AWS_REGION)
+session = get_dest_s3_session()
 # Db settings
 
 def build_engine():
