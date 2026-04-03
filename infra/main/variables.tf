@@ -76,6 +76,6 @@ variable "snowflake_password" {
 }
 
 variable "image_name" {
-  type = string
+  type    = string
   default = "supplychain360/current-image"
 }
