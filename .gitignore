@@ -207,6 +207,8 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
+# Airflow secrets
+airflow/include/secrets/
 logs/
 service_account*
 watermark/
