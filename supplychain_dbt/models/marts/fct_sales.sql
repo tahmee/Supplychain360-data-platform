@@ -1,13 +1,23 @@
 -- fct_sales.sql
 -- Grain: one row per product per transaction.
---
--- SCD Type II join pattern:
---   Facts join to the dimension version that was CURRENT at transaction time, the join condition matches the dim row where valid_from/valid_to window
---   contains the transaction timestamp.
+
+{{
+    config(
+        materialized       = 'incremental',
+        unique_key         = 'transaction_id',
+        incremental_strategy = 'merge',
+        on_schema_change   = 'sync_all_columns',
+    )
+}}
 
 with sales as (
 
     select * from {{ ref('stg_sales') }}
+
+    {% if is_incremental() %}
+    -- Only process rows ingested since the last run
+    where _ingestion_timestamp > (select max(_ingestion_timestamp) from {{ this }})
+    {% endif %}
 
 ),
 
