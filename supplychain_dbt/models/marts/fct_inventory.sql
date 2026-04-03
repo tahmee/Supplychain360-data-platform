@@ -1,9 +1,22 @@
 -- fct_inventory.sql
 -- Grain: one product stocked per warehouse per day (daily snapshot).
 
+{{
+    config(
+        materialized         = 'incremental',
+        unique_key           = 'inventory_key',
+        incremental_strategy = 'merge',
+        on_schema_change     = 'sync_all_columns',
+    )
+}}
+
 with inventory as (
 
     select * from {{ ref('stg_inventory') }}
+
+    {% if is_incremental() %}
+    where _ingestion_timestamp > (select max(_ingestion_timestamp) from {{ this }})
+    {% endif %}
 
 ),
 

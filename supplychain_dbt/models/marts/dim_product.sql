@@ -1,7 +1,5 @@
 -- dim_product.sql
 -- SCD Type II dimension. Reads from the dbt snapshot which tracks all historical versions of each product row.
--- is_current = true  - the active version used in current-state reporting
--- is_current = false - historical version; join on surrogate_key + valid_from/to for point-in-time (as-of) reporting
 
 with snapshot as (
 

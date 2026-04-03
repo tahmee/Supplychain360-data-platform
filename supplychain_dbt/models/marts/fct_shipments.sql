@@ -1,11 +1,22 @@
 -- fct_shipments.sql
 -- Grain: one product shipped from a warehouse to a store per shipment.
---
--- SCD Type II join: product and warehouse versions are matched to the shipment_date so historical analysis reflects the attributes at dispatch.
+
+{{
+    config(
+        materialized         = 'incremental',
+        unique_key           = 'shipment_id',
+        incremental_strategy = 'merge',
+        on_schema_change     = 'sync_all_columns',
+    )
+}}
 
 with shipments as (
 
     select * from {{ ref('stg_shipments') }}
+
+    {% if is_incremental() %}
+    where _ingestion_timestamp > (select max(_ingestion_timestamp) from {{ this }})
+    {% endif %}
 
 ),
 
