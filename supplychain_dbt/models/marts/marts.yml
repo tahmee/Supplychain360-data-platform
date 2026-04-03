@@ -1,0 +1,107 @@
+version: 2
+
+models:
+  - name: dim_date
+    description: "Date dimension spanning project start to +2 years."
+    columns:
+      - name: date_id
+        tests: [not_null, unique]
+
+  - name: dim_product
+    description: >
+      SCD Type II product dimension. Each row is one version of a product.
+      Use is_current = true for current-state reporting.
+      Join fct_sales on product_surrogate_key for point-in-time accuracy.
+    columns:
+      - name: surrogate_key
+        tests: [not_null, unique]
+      - name: product_id
+        tests: [not_null]
+      - name: valid_from
+        tests: [not_null]
+      - name: is_current
+        tests: [not_null]
+
+  - name: dim_store
+    description: >
+      SCD Type II store dimension. Tracks changes to store_name, city, state, region.
+    columns:
+      - name: surrogate_key
+        tests: [not_null, unique]
+      - name: store_id
+        tests: [not_null]
+      - name: valid_from
+        tests: [not_null]
+      - name: is_current
+        tests: [not_null]
+
+  - name: dim_supplier
+    description: >
+      SCD Type II supplier dimension. Tracks changes to supplier_name, category, country.
+    columns:
+      - name: surrogate_key
+        tests: [not_null, unique]
+      - name: supplier_id
+        tests: [not_null]
+      - name: valid_from
+        tests: [not_null]
+      - name: is_current
+        tests: [not_null]
+
+  - name: dim_warehouse
+    description: >
+      SCD Type II warehouse dimension. Tracks changes to city and state.
+    columns:
+      - name: surrogate_key
+        tests: [not_null, unique]
+      - name: warehouse_id
+        tests: [not_null]
+      - name: valid_from
+        tests: [not_null]
+      - name: is_current
+        tests: [not_null]
+
+  - name: fct_sales
+    description: >
+      Sales fact table. Joins to dimension surrogate keys for point-in-time accuracy.
+      product_surrogate_key references the product version current at transaction time.
+    columns:
+      - name: transaction_id
+        tests: [not_null, unique]
+      - name: store_id
+        tests: [not_null]
+      - name: product_id
+        tests: [not_null]
+      - name: date_id
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_date')
+              field: date_id
+      - name: product_surrogate_key
+        tests:
+          - relationships:
+              to: ref('dim_product')
+              field: surrogate_key
+
+  - name: fct_shipments
+    description: "Shipment fact table with point-in-time dimension surrogate keys."
+    columns:
+      - name: shipment_id
+        tests: [not_null, unique]
+      - name: product_surrogate_key
+        tests:
+          - relationships:
+              to: ref('dim_product')
+              field: surrogate_key
+      - name: warehouse_surrogate_key
+        tests:
+          - relationships:
+              to: ref('dim_warehouse')
+              field: surrogate_key
+
+  - name: fct_inventory
+    description: "Daily inventory snapshot fact table."
+    columns:
+      - name: inventory_key
+        tests: [not_null, unique]
