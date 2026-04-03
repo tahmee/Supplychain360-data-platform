@@ -74,3 +74,8 @@ variable "snowflake_password" {
   type        = string
   sensitive   = true
 }
+
+variable "image_name" {
+  type = string
+  default = "supplychain360/current-image"
+}
