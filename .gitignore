@@ -207,6 +207,10 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
+logs/
+service_account*
+watermark/
+test.py
 
 # Local .terraform directories
 .terraform/
