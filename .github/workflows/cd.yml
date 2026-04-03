@@ -1,0 +1,92 @@
+name: CD
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION:     eu-central-1
+  ECR_REPOSITORY: supplychain360
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── Authenticate to AWS via OIDC ──────────────────────────────────────
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume:    ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          role-session-name: sc360-cd-${{ github.run_id }}
+          aws-region:        ${{ env.AWS_REGION }}
+
+      # ── Log in to ECR ─────────────────────────────────────────────────────
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # ── Get next version tag from ECR ─────────────────────────────────────
+      - name: Get next image version
+        id: version
+        run: |
+          LATEST=$(aws ecr describe-images \
+            --repository-name $ECR_REPOSITORY \
+            --query 'imageDetails[*].imageTags[*]' \
+            --output text \
+            | tr '\t' '\n' \
+            | grep -E '^v[0-9]+$' \
+            | sort -V \
+            | tail -1)
+
+          if [ -z "$LATEST" ]; then
+            NEXT="v1"
+          else
+            NUM="${LATEST#v}"
+            NEXT="v$((NUM + 1))"
+          fi
+
+          echo "tag=${NEXT}" >> "$GITHUB_OUTPUT"
+          echo "Next version: ${NEXT}"
+
+      # ── Build, tag, push ──────────────────────────────────────────────────
+      - name: Build and push Docker image
+        id: build
+        env:
+          REGISTRY:  ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          IMAGE_URI="${REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+
+          docker build \
+            --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --build-arg GIT_SHA="${{ github.sha }}" \
+            -t "${IMAGE_URI}" \
+            .
+
+          docker push "${IMAGE_URI}"
+
+          echo "image_uri=${IMAGE_URI}" >> "$GITHUB_OUTPUT"
+          echo "Image pushed: ${IMAGE_URI}"
+
+      # ── Store latest image URI in Secrets Manager ─────────────────────────
+      - name: Update latest-image in Secrets Manager
+        env:
+          IMAGE_URI: ${{ steps.build.outputs.image_uri }}
+        run: |
+          aws secretsmanager put-secret-value \
+            --secret-id "supplychain360/latest-image" \
+            --secret-string "${IMAGE_URI}"
+
+      # ── Summary ───────────────────────────────────────────────────────────
+      - name: Summary
+        run: |
+          echo "### CD complete :rocket:" >> $GITHUB_STEP_SUMMARY
+          echo "Image: ${{ steps.build.outputs.image_uri }}" >> $GITHUB_STEP_SUMMARY
