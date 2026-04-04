@@ -1,12 +1,3 @@
-"""
-config.py  –  Centralised configuration, logging, and watermark utilities
-for SupplyChain360 ingestion scripts.
-
-ENV vars consumed (all optional locally; required in prod via Secrets Manager):
-  DB_CRED           – full SQLAlchemy connection URL for Supabase
-  GOOGLE_SECRET_ID  – AWS Secrets Manager secret name for GSheet service-account JSON
-  AWS_REGION        – defaults to eu-central-1
-"""
 
 import json
 import logging
@@ -20,36 +11,30 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ---------------------------------------------------------------------------
-# PATHS
-# ---------------------------------------------------------------------------
+# Paths
 
-ROOT_DIR      = Path(__file__).resolve().parents[1]   # src/
-LOG_DIR       = ROOT_DIR / "logs"
+ROOT_DIR = Path(__file__).resolve().parents[1]   # src/
+LOG_DIR = ROOT_DIR / "logs"
 WATERMARK_DIR = ROOT_DIR / "watermark"
 
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 WATERMARK_DIR.mkdir(parents=True, exist_ok=True)
 
-# ---------------------------------------------------------------------------
-# ENVIRONMENT
-# ---------------------------------------------------------------------------
+# Environments
 
-AWS_REGION        = os.getenv("AWS_REGION", "eu-central-1")
-DB_CRED           = os.getenv("DB_CRED")           # set locally via .env
-GOOGLE_SECRET_ID  = os.getenv("GOOGLE_SECRET_ID",  "supplychain360/google-service-account")
-DB_SECRET_ID      = os.getenv("DB_SECRET_ID",      "supplychain360/supabase-db-cred")
+AWS_REGION = os.getenv("AWS_REGION", "eu-central-1")
+DB_CRED = os.getenv("DB_CRED")      
+GOOGLE_SECRET_ID = os.getenv("GOOGLE_SECRET_ID")
+DB_SECRET_ID = os.getenv("DB_SECRET_ID")
 GSHEET_ID = os.getenv("SHEET_ID")
 DB_SCHEMA =os.getenv("DB_SCHEMA")
 
 # Deployment flag: when True, credentials are fetched from Secrets Manager
-DEPLOY_ENV = os.getenv("DEPLOY_ENV", "local").lower()   # "local" | "prod"
+DEPLOY_ENV = os.getenv("DEPLOY_ENV").lower()   
 
-# ---------------------------------------------------------------------------
-# AWS SECRETS MANAGER
-# ---------------------------------------------------------------------------
+# AWS Secrets Manager
 
-def get_secret(secret_id: str, region: str = AWS_REGION) -> str:
+def get_secret(secret_id, region= AWS_REGION):
     """Retrieve a plaintext or JSON secret from AWS Secrets Manager."""
     client = boto3.client("secretsmanager", region_name=region)
     try:
@@ -59,32 +44,61 @@ def get_secret(secret_id: str, region: str = AWS_REGION) -> str:
         raise RuntimeError(f"Failed to fetch secret '{secret_id}': {exc}") from exc
 
 
-def get_google_credentials() -> dict:
+def get_google_credentials():
     """
     Returns the Google service-account credentials as a dict.
-    - Local:  reads SERVICE_ACCOUNT_FILE (path from env or default)
-    - Prod:   pulls JSON from AWS Secrets Manager
+    Resolution order:
+    1. Airflow connection 'google_sheets' (Keyfile JSON field)
+    2. AWS Secrets Manager (DEPLOY_ENV=prod)
+    3. Local service_account.json file
     """
+    try:
+        from airflow.hooks.base import BaseHook
+        conn = BaseHook.get_connection("google_sheets")
+        if conn.extra:
+            extra = json.loads(conn.extra)
+            keyfile = (
+                extra.get("keyfile_dict")
+                or extra.get("extra__google_cloud_platform__keyfile_dict")
+            )
+            if keyfile:
+                return json.loads(keyfile) if isinstance(keyfile, str) else keyfile
+    except Exception as _e:
+        logging.getLogger("sc360.config").warning("Airflow connection lookup failed: %s", _e)
+
     if DEPLOY_ENV == "prod":
         raw = get_secret(GOOGLE_SECRET_ID)
         return json.loads(raw)
 
     sa_file = os.getenv("SERVICE_ACCOUNT_FILE", str(ROOT_DIR / "service_account.json"))
     if not os.path.exists(sa_file):
-        raise FileNotFoundError(
-            f"Service account file not found: '{sa_file}'. "
+        raise FileNotFoundError( f"Service account file not found: '{sa_file}'. "
             "Set SERVICE_ACCOUNT_FILE env var or switch to DEPLOY_ENV=prod."
         )
     with open(sa_file) as f:
         return json.load(f)
 
 
-def get_db_cred() -> str:
+def get_db_cred():
     """
     Returns the SQLAlchemy DB connection URL.
-    - Local:  reads DB_CRED from .env
-    - Prod:   pulls from AWS Secrets Manager (stored as a plain URL string)
+    Resolution order:
+    1. Airflow connection 'postgres_supabase'
+    2. AWS Secrets Manager (DEPLOY_ENV=prod)
+    3. DB_CRED env var (.env / local)
     """
+    try:
+        from airflow.hooks.base import BaseHook
+        conn = BaseHook.get_connection("postgres_supabase")
+        if conn.host and conn.login:
+            port = conn.port or 5432
+            return (
+                f"postgresql+psycopg2://{conn.login}:{conn.password}"
+                f"@{conn.host}:{port}/{conn.schema or 'postgres'}"
+            )
+    except Exception as _e:
+        logging.getLogger("sc360.config").warning("Airflow connection lookup failed: %s", _e)
+
     if DEPLOY_ENV == "prod":
         return get_secret(DB_SECRET_ID)
     if not DB_CRED:
@@ -93,11 +107,79 @@ def get_db_cred() -> str:
         )
     return DB_CRED
 
-# ---------------------------------------------------------------------------
-# LOGGING
-# ---------------------------------------------------------------------------
 
-def get_logger(service_name: str) -> logging.Logger:
+def get_dest_s3_session():
+    """
+    Returns a boto3 Session for the destination (own) S3 bucket.
+    Resolution order:
+    1. Airflow connection 'aws_default'
+    2. Ambient credentials (env vars / IAM role)
+    """
+    try:
+        from airflow.hooks.base import BaseHook
+        conn = BaseHook.get_connection("aws_default")
+        if conn.login and conn.password:
+            return boto3.Session(
+                aws_access_key_id=conn.login,
+                aws_secret_access_key=conn.password,
+                region_name=AWS_REGION,
+            )
+    except Exception as _e:
+        logging.getLogger("sc360.config").warning("Airflow connection lookup failed: %s", _e)
+    return boto3.Session(region_name=AWS_REGION)
+
+
+def get_dest_s3_client():
+    """
+    Returns a boto3 S3 client for the destination (own) bucket.
+    Resolution order:
+    1. Airflow connection 'aws_default'
+    2. Ambient credentials (env vars / IAM role)
+    """
+    return get_dest_s3_session().client("s3")
+
+
+def get_src_s3_credentials():
+    """
+    Returns the S3 static access keys as a dict with keys
+    'aws_access_key_id' and 'aws_secret_access_key'.
+
+    Resolution order:
+    1. Airflow connection 'aws_src_s3' (preferred when running inside Airflow)
+    2. AWS Secrets Manager (when DEPLOY_ENV=prod and no Airflow connection)
+    3. SRC_S3_ACCESS_KEY_ID / SRC_S3_SECRET_ACCESS_KEY env vars (local dev)
+    """
+    # 1. Airflow connection — available when the code runs inside an Airflow task
+    try:
+        from airflow.hooks.base import BaseHook
+        conn = BaseHook.get_connection("aws_src_s3")
+        if conn.login and conn.password:
+            return {
+                "aws_access_key_id":     conn.login,
+                "aws_secret_access_key": conn.password,
+            }
+    except Exception as _e:
+        logging.getLogger("sc360.config").warning("Airflow connection lookup failed: %s", _e)
+
+    # 2. Secrets Manager (prod deployments without Airflow connection)
+    if DEPLOY_ENV == "prod":
+        raw = get_secret(os.getenv("SRC_S3_SECRET_ID", "supplychain360/s3-source-keys"))
+        return json.loads(raw)
+
+    # 3. Local .env fallback
+    key_id = os.getenv("SRC_S3_ACCESS_KEY_ID")
+    secret = os.getenv("SRC_S3_SECRET_ACCESS_KEY")
+    if not key_id or not secret:
+        raise EnvironmentError(
+            "No source S3 credentials found. Either create an Airflow connection "
+            "'aws_src_s3', set DEPLOY_ENV=prod (Secrets Manager), or set "
+            "SRC_S3_ACCESS_KEY_ID and SRC_S3_SECRET_ACCESS_KEY in .env."
+        )
+    return {"aws_access_key_id": key_id, "aws_secret_access_key": secret}
+
+# Logging setup
+
+def get_logger(service_name):
     """
     Returns a named logger that writes to both stdout and a dated log file
     under logs/<service_name>/.  Safe to call multiple times (idempotent).
@@ -109,7 +191,7 @@ def get_logger(service_name: str) -> logging.Logger:
     logger   = logging.getLogger(f"sc360.{service_name}")
 
     if logger.handlers:
-        return logger   # already configured
+        return logger  
 
     logger.setLevel(logging.INFO)
     fmt = logging.Formatter(
@@ -123,15 +205,13 @@ def get_logger(service_name: str) -> logging.Logger:
     logger.propagate = False
     return logger
 
-# ---------------------------------------------------------------------------
-# WATERMARK  (generic, keyed by service)
-# ---------------------------------------------------------------------------
+# Watermark setup
 
-def _watermark_path(service_name: str) -> Path:
+def _watermark_path(service_name):
     return WATERMARK_DIR / f"{service_name}.json"
 
 
-def load_watermark(service_name: str) -> dict:
+def load_watermark(service_name):
     """Load watermark state for the given service (returns {} on first run)."""
     path = _watermark_path(service_name)
     if path.exists():
@@ -140,15 +220,12 @@ def load_watermark(service_name: str) -> dict:
     return {}
 
 
-def save_watermark(service_name: str, wm: dict) -> None:
+def save_watermark(service_name, wm) :
     """Persist watermark state for the given service."""
     path = _watermark_path(service_name)
     with open(path, "w") as f:
         json.dump(wm, f, indent=2)
 
-# ---------------------------------------------------------------------------
-# MISC
-# ---------------------------------------------------------------------------
 
-def now_iso() -> str:
+def now_iso():
     return datetime.now(tz=timezone.utc).isoformat()

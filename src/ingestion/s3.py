@@ -1,20 +1,17 @@
 import io
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import awswrangler as wr
 import boto3
 import pandas as pd
 from botocore.exceptions import BotoCoreError, ClientError
 
-from utils.config import AWS_REGION, get_logger, load_watermark, now_iso, save_watermark
+from utils.config import AWS_REGION, get_dest_s3_client, get_logger, get_src_s3_credentials, load_watermark, now_iso, save_watermark
 from utils.validate import save_validation_report, validate_parquet
 
-# ---------------------------------------------------------------------------
-# CONFIGURATION
-# ---------------------------------------------------------------------------
-
+# Config
 SOURCE_BUCKET   = "supplychain360-data"       # Account-A bucket (read-only)
 SOURCE_PREFIX   = "raw/"
 
@@ -31,38 +28,29 @@ SERVICE_NAME = "s3"
 logger = get_logger(SERVICE_NAME)
 
 
-# S3 HELPERS
-# ---------------------------------------------------------------------------
+# S3 bucket checkers
 
-def list_objects(s3_client, bucket: str, prefix: str) -> list[dict]:
+def list_objects(s3_client, bucket, prefix):
     objects, paginator = [], s3_client.get_paginator("list_objects_v2")
     for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
         objects.extend(page.get("Contents", []))
     return objects
 
 
-def read_object(s3_client, bucket: str, key: str) -> bytes:
+def read_object(s3_client, bucket, key):
     return s3_client.get_object(Bucket=bucket, Key=key)["Body"].read()
 
-# ---------------------------------------------------------------------------
-# WATERMARK HELPERS
-# ---------------------------------------------------------------------------
 
-def parse_ts(ts_str: str | None) -> datetime:
+# watermark checkers
+
+def parse_ts(ts_str):
     if not ts_str:
         return datetime(1970, 1, 1, tzinfo=timezone.utc)
     return datetime.fromisoformat(ts_str)
 
-# ---------------------------------------------------------------------------
-# PARQUET CONVERSION
-# ---------------------------------------------------------------------------
+#Parquet conversion
 
-def to_parquet(
-    raw_bytes: bytes,
-    source_key: str,
-    ingestion_ts: str,
-    run_id: str,
-) -> tuple[bytes, pd.DataFrame]:
+def to_parquet(raw_bytes, source_key, ingestion_ts, run_id):
     if not raw_bytes:
         raise ValueError(f"File is empty: {source_key}")
 
@@ -85,7 +73,6 @@ def to_parquet(
     df["_ingestion_timestamp"] = ingestion_ts
     df["_run_id"]              = run_id
     df["_source_bucket"]       = SOURCE_BUCKET
-    df["_source_key"]          = source_key
     df["_ingested_by"]         = "s3_ingest_script"
 
     buf = io.BytesIO()
@@ -93,28 +80,22 @@ def to_parquet(
     return buf.getvalue(), source_df
 
 
-def build_dest_key(source_key: str) -> str:
+def build_dest_key(source_key):
     relative = source_key[len(SOURCE_PREFIX):]
     base     = os.path.splitext(relative)[0]
     return f"{DEST_PREFIX}{base}.parquet"
 
-# ---------------------------------------------------------------------------
-# CORE INGEST
-# ---------------------------------------------------------------------------
 
-def ingest_file(
-    src_s3, dst_s3,
-    source_key: str,
-    ingestion_ts: str,
-    run_id: str,
-) -> None:
-    logger.info("  ↓ reading   s3://%s/%s", SOURCE_BUCKET, source_key)
+# Main ingestion
+
+def ingest_file(src_s3, dst_s3, source_key, ingestion_ts, run_id):
+    logger.info("Reading s3://%s/%s", SOURCE_BUCKET, source_key)
     raw = read_object(src_s3, SOURCE_BUCKET, source_key)
 
     parquet_bytes, source_df = to_parquet(raw, source_key, ingestion_ts, run_id)
 
     dest_key = build_dest_key(source_key)
-    logger.info("  ↑ uploading s3://%s/%s", DEST_BUCKET, dest_key)
+    logger.info("Uploading s3://%s/%s", DEST_BUCKET, dest_key)
     dst_s3.put_object(
         Bucket=DEST_BUCKET, Key=dest_key,
         Body=parquet_bytes, ContentType="application/octet-stream",
@@ -123,17 +104,14 @@ def ingest_file(
     vr = validate_parquet(
         source_df=source_df, s3_client=dst_s3,
         bucket=DEST_BUCKET, dest_key=dest_key,
-        run_id=run_id, source_name=source_key,
+        run_id=run_id, source_name=os.path.splitext(os.path.basename(source_key))[0],
     )
     save_validation_report(vr)
     if vr["status"] == "FAILED":
         raise ValueError(f"Validation FAILED for '{source_key}'.")
 
 
-def ingest_folder(
-    src_s3, dst_s3, folder: str, since: datetime,
-    label: str, run_id: str, succeeded: list, failed: list,
-) -> None:
+def ingest_folder(src_s3, dst_s3, folder, since, label, run_id, succeeded, failed):
     prefix = f"{SOURCE_PREFIX}{folder}/"
     try:
         objects = list_objects(src_s3, SOURCE_BUCKET, prefix)
@@ -165,9 +143,7 @@ def ingest_folder(
             logger.error("  ✗ Unexpected '%s': %s", key, exc)
             failed.append({"key": key, "error": str(exc)})
 
-# ---------------------------------------------------------------------------
-# MAIN
-# ---------------------------------------------------------------------------
+# Main
 
 def main() -> None:
     run_id          = str(uuid.uuid4())
@@ -179,10 +155,15 @@ def main() -> None:
     logger.info("Timestamp : %s", ingestion_start)
     logger.info("=" * 60)
 
-    # Both src and dst use ambient credentials (aws-vault locally; task IAM role in prod)
     try:
-        src_s3 = boto3.client("s3", region_name=AWS_REGION)
-        dst_s3 = boto3.client("s3", region_name=AWS_REGION)
+        src_creds = get_src_s3_credentials()
+        src_s3 = boto3.client(
+            "s3",
+            region_name=AWS_REGION,
+            aws_access_key_id=src_creds["aws_access_key_id"],
+            aws_secret_access_key=src_creds["aws_secret_access_key"],
+        )
+        dst_s3 = get_dest_s3_client()
     except Exception as exc:
         logger.critical("AWS session error: %s", exc)
         raise SystemExit(1)
@@ -201,7 +182,7 @@ def main() -> None:
 
     # Static – full refresh every STATIC_REFRESH_DAYS days
     logger.info("--- STATIC FOLDERS (full refresh every %d days) ---", STATIC_REFRESH_DAYS)
-    cutoff = datetime.now(tz=timezone.utc) - pd.Timedelta(days=STATIC_REFRESH_DAYS)
+    cutoff = datetime.now(tz=timezone.utc) - timedelta(days=STATIC_REFRESH_DAYS)
     for folder in STATIC_FOLDERS:
         last_sync = parse_ts(wm.get(f"static.{folder}"))
         if last_sync > cutoff:
