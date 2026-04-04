@@ -4,15 +4,20 @@ import json
 import os
 from datetime import datetime, timezone
 
+import boto3
 import pandas as pd
+from botocore.exceptions import BotoCoreError, ClientError
 
-from .config import LOG_DIR, get_logger
+from .config import AWS_REGION, LOG_DIR, get_logger
 
-log = logging.getLogger(__name__) if False else get_logger("validate")
+log = get_logger("validate")
+
+MONITORING_BUCKET = "supplychain360-bucket-t3"
+MONITORING_PREFIX = "monitoring/validation/"
 
 VALIDATION_LOG_FILE = LOG_DIR / "validation_report.jsonl"
 
-# Metadata columns injected during ingestion – excluded from data comparisons
+# Metadata columns injected during ingestion 
 METADATA_COLS = {
     "_ingestion_timestamp",
     "_run_id",
@@ -26,12 +31,9 @@ METADATA_COLS = {
     "_ingested_by",
 }
 
+# Checksum
 
-# ---------------------------------------------------------------------------
-# CHECKSUM
-# ---------------------------------------------------------------------------
-
-def compute_checksum(df: pd.DataFrame) -> str:
+def compute_checksum(df):
     data_cols = [c for c in df.columns if c not in METADATA_COLS]
     df_sorted = (
         df[data_cols]
@@ -42,11 +44,9 @@ def compute_checksum(df: pd.DataFrame) -> str:
     return hashlib.md5(csv_bytes).hexdigest()
 
 
-# ---------------------------------------------------------------------------
-# COLUMN STATS
-# ---------------------------------------------------------------------------
+# Column stats
 
-def compute_col_stats(df: pd.DataFrame) -> dict:
+def compute_col_stats(df):
     stats     = {}
     data_cols = [c for c in df.columns if c not in METADATA_COLS]
     for col in data_cols:
@@ -59,41 +59,31 @@ def compute_col_stats(df: pd.DataFrame) -> dict:
     return stats
 
 
-# ---------------------------------------------------------------------------
-# SCHEMA COMPARISON
-# ---------------------------------------------------------------------------
+# Schema comparison
 
-def compare_schemas(source_df: pd.DataFrame, dest_df: pd.DataFrame) -> dict:
+def compare_schemas(source_df, dest_df) :
     source_cols = {c: str(source_df[c].dtype)
                    for c in source_df.columns if c not in METADATA_COLS}
-    dest_cols   = {c: str(dest_df[c].dtype)
+    dest_cols = {c: str(dest_df[c].dtype)
                    for c in dest_df.columns   if c not in METADATA_COLS}
 
-    missing_in_dest  = set(source_cols) - set(dest_cols)
-    extra_in_dest    = set(dest_cols)   - set(source_cols)
+    missing_in_dest = set(source_cols) - set(dest_cols)
+    extra_in_dest = set(dest_cols)   - set(source_cols)
     dtype_mismatches = {
         col: {"source": source_cols[col], "dest": dest_cols[col]}
         for col in source_cols
         if col in dest_cols and source_cols[col] != dest_cols[col]
     }
     return {
-        "match":            not missing_in_dest and not extra_in_dest and not dtype_mismatches,
-        "missing_in_dest":  list(missing_in_dest),
-        "extra_in_dest":    list(extra_in_dest),
+        "match": not missing_in_dest and not extra_in_dest and not dtype_mismatches,
+        "missing_in_dest": list(missing_in_dest),
+        "extra_in_dest": list(extra_in_dest),
         "dtype_mismatches": dtype_mismatches,
     }
 
 
-# ---------------------------------------------------------------------------
-# MAIN VALIDATION FUNCTION
-# ---------------------------------------------------------------------------
-
-def validate_parquet(source_df:   pd.DataFrame, s3_client,
-    bucket:      str,
-    dest_key:    str,
-    run_id:      str,
-    source_name: str,
-) -> dict:
+# Main Validation Function
+def validate_parquet(source_df, s3_client, bucket, dest_key, run_id, source_name):
     """
     Read Parquet back from S3 and validate against source DataFrame.
     Returns a result dict; status is 'PASSED' or 'FAILED'.
@@ -101,17 +91,17 @@ def validate_parquet(source_df:   pd.DataFrame, s3_client,
     log.info("[VALIDATE] Starting validation for '%s'", source_name)
 
     result = {
-        "run_id":       run_id,
-        "source_name":  source_name,
-        "dest_key":     dest_key,
+        "run_id": run_id,
+        "source_name": source_name,
+        "dest_key": dest_key,
         "validated_at": datetime.now(tz=timezone.utc).isoformat(),
-        "status":       "UNKNOWN",
+        "status": "UNKNOWN",
         "checks": {
-            "row_count":    {"passed": False, "source": 0,  "dest": 0},
+            "row_count": {"passed": False, "source": 0,  "dest": 0},
             "column_count": {"passed": False, "source": 0,  "dest": 0},
-            "schema":       {"passed": False, "details": {}},
-            "checksum":     {"passed": False, "source": "", "dest": ""},
-            "col_stats":    {"passed": False, "mismatches": []},
+            "schema": {"passed": False, "details": {}},
+            "checksum": {"passed": False, "source": "", "dest": ""},
+            "col_stats": {"passed": False, "mismatches": []},
         },
         "errors": [],
     }
@@ -119,7 +109,7 @@ def validate_parquet(source_df:   pd.DataFrame, s3_client,
     # Read back from S3
     try:
         parquet_bytes = s3_client.get_object(Bucket=bucket, Key=dest_key)["Body"].read()
-        dest_df       = pd.read_parquet(io.BytesIO(parquet_bytes))
+        dest_df = pd.read_parquet(io.BytesIO(parquet_bytes))
         log.info("[VALIDATE] Parquet read back (%d rows)", len(dest_df))
     except Exception as exc:
         msg = f"Could not read Parquet back from S3: {exc}"
@@ -186,19 +176,34 @@ def validate_parquet(source_df:   pd.DataFrame, s3_client,
     return result
 
 
-# ---------------------------------------------------------------------------
-# PERSISTENCE
-# ---------------------------------------------------------------------------
+# Persists validation report
 
-def save_validation_report(result: dict) -> None:
-    """Append one JSON line per file per run to the shared validation log."""
+def save_validation_report(result) :
+    """Append one JSON line per run to the local log and upload to S3 for durability."""
     VALIDATION_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(result) + "\n"
+
     with open(VALIDATION_LOG_FILE, "a") as f:
-        f.write(json.dumps(result) + "\n")
+        f.write(line)
     log.info("[VALIDATE] Report saved → %s", VALIDATION_LOG_FILE)
 
+    # Upload individual report to S3 so it's available when container restarts
+    date_str = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+    s3_key = f"{MONITORING_PREFIX}{date_str}/{result['run_id']}_{result['source_name']}.json"
+    try:
+        s3 = boto3.client("s3", region_name=AWS_REGION)
+        s3.put_object(
+            Bucket=MONITORING_BUCKET,
+            Key=s3_key,
+            Body=line.encode(),
+            ContentType="application/json",
+        )
+        log.info("[VALIDATE] Report uploaded → s3://%s/%s", MONITORING_BUCKET, s3_key)
+    except (BotoCoreError, ClientError) as exc:
+        log.warning("[VALIDATE] S3 upload of report failed (non-fatal): %s", exc)
 
-def load_validation_history() -> pd.DataFrame:
+
+def load_validation_history():
     if not VALIDATION_LOG_FILE.exists():
         return pd.DataFrame()
     records = []

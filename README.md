@@ -35,6 +35,7 @@ This platform solves that by:
 ---
 
 ## Architecture
+<img width="2483" height="1476" alt="supch360_architecture" src="https://github.com/user-attachments/assets/ad518c2c-9346-4da1-95e0-43fb476dda74" />
 
 ---
 
